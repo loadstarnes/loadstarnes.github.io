@@ -3,7 +3,6 @@
 
 Austin Starnes
 
-[editor on GitHub](https://github.com/loadstarnes/loadstarnes.github.io/edit/master/index.md)
 #
 
 ### Inspiration
