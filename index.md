@@ -23,6 +23,8 @@ Does geopolitical tension - such as that between US and Russia, or US and China 
 Through the process, I added tools as I needed them. I ended up needing these python modules:
 
 ```markdown
+# Austin Starnes - Final Tutorial
+
 # Install modules not included with docker image
 !pip install graphviz
 !pip install lxml
@@ -41,11 +43,17 @@ import re
 
 # Data Handling & Visualization
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from pandas.plotting import register_matplotlib_converters
 from graphviz import Digraph, Graph
 import romkan 
+from scipy.stats import gaussian_kde as kde
+from matplotlib.colors import Normalize
+from matplotlib import cm
+from matplotlib import animation
 register_matplotlib_converters()
+
 
 ```
 
@@ -150,11 +158,11 @@ df['artist_str'] = df['artist_and_title'].apply(lambda s: process_artist_title(s
 df['title'] = df['artist_and_title'].apply(lambda s: process_artist_title(s)['title'])
 # Drop the crap we don't need.
 # We are only keeping some countries to speed up analysis.
-# Those are, United States, South Korea, Japan, China, Germany, India,
-#  Taiwan, France, Thailand, Australia, Russia, Italy,
+# Those are, United States, South Korea, Japan, China, Canada, Germany, India,
+#  United Kingdom, Taiwan, France, Thailand, Australia, Russia, Italy,
 #  and Hong Kong
 df = df[['pos', 'title', 'artist_str', 'artist_and_title', 'days',
-         'pk', 'pts', 'tpts', 'us', 'kr', 'jp', 'cn', 'de', 'in',
+         'pk', 'pts', 'tpts', 'us', 'kr', 'jp', 'cn', 'ca', 'de', 'in', 'uk',
          'tw', 'fr', 'th', 'au', 'ru', 'it', 'hk', 'date']]
 df
 ```
@@ -257,5 +265,208 @@ artists = artists_vc.keys()
 # This will hold the artists' origin country.
 artists_country = {}
 ```
+Now, let's make a dataframe for each artist's origin country. It takes a long time to load the api for artist's country, as it throttles requests at 1 per second. It should use the csv file if it's available.
+
+```
+artists = list(artists)
+count = 0
+co_orig_df = None
+if os.path.isfile('artists_orig_country.csv'):
+    print("Found archived version! Using it.")
+    co_orig_df = pd.read_csv('artists_orig_country.csv')
+else:
+    # API for finding country of origin! They're nice, no dev token needed
+    url = 'https://musicbrainz.org/ws/2/artist'
+    payload = { 'fmt':'json', 'query': artists[0]}
+    headers = {'User-Agent': 'DataScience-School-Proj/0.1 ( AustinStarnes136@gmail.com )'}
+    r = requests.get(url=url, headers=headers, params=payload)
+    x = 0
+    l = len(artists)
+    unresolved = {}
+    # THIS TAKES LIKE 16 MINUTES.
+    # The api throttles you by IP and by user-agent if you exceed a single
+    # request per second...
+    # Having nearly 800 unique artists, it will take some time.
+    # If you rerun this block without the one above, it will not look for
+    # artists already in the dictionary.
+    start_time = time.time()
+    while x < l:
+        json = r.json()
+        keys = json.keys()
+        art = artists[x]
+        # Only processes the artist if we haven't found their origin yet.
+        # This will only matter if you run this block more than once - it can
+        # retry for any artist it didn't find before. Not that it would help,
+        # unless you changed the way it calculates the best match.
+        if art not in artists_country.keys() or artists_country[art] == None:
+            percent = (x+1)*100/l
+            curr_time = time.time()
+            elapsed = curr_time - start_time if curr_time != start_time else 0.000001
+            remaining_secs = int((100-percent)/(percent/elapsed))
+            time_left = str(int(remaining_secs/60)) + 'm' + str(int(remaining_secs%60))
+            while r.status_code != 200 or 'error' in keys:
+                print(json)
+                payload = { 'fmt':'json', 'query': art }
+                r = requests.get(url=url, headers=headers, params=payload)
+                count = 0
+                # Slowwwwwly
+                time.sleep(1)
+            aliases = []
+            country = None
+            best = None
+            for i in json['artists']:
+                if i['score'] == 100:
+                    best = i
+                    if best['name'] == art or best['sort-name'] == art:
+                        break
+                    break
+                elif i['score'] > 90 and i['name'] == art or i['sort-name'] == art:
+                    best = i
+                    break
+                else:
+                    print(i['score'])
+
+            # Do your best to find the match. Lil Wayne does not have an origin country in this data...
+            country = best['country'] if best is not None and 'country' in best.keys() else None
+            artists_country[art] = country 
+            if artists_country[art] is not None:
+                sys.stdout.write('\r' + '{:05.2f}%   '.format(percent) + str(art) + " :: " + artists_country[art])
+            else:
+                sys.stdout.write('\r' + 'couldn\'t find ' + art + ' easily')
+                unresolved[art] = json
+            sys.stdout.write('\t\t' + str(time_left) + "sec left                        ")
+            sys.stdout.flush()
+        count += 1
+        x += 1
+        if x < l:
+            art = artists[x]
+            if art not in artists_country.keys() or artists_country.keys() == None:
+                time.sleep(0.99)
+                payload = { 'fmt':'json', 'query': art }
+                r = requests.get(url=url, headers=headers, params=payload)
+
+    # make it a DataFrame. Best data structure.
+    co_orig_df = pd.DataFrame.from_dict(artists_country, orient='index',
+                                        columns = ['origin'])
+
+# SAVE IT SAVE IT
+co_orig_df.to_csv('artists_orig_country.csv', index=False)
+co_orig_df.columns = ['artist', 'origin']
+co_orig_df = co_orig_df.set_index(['artist'])
+co_orig_df
+```
+
+Now, we can gather some data about each country...
+
+```
+# Our country data!
+# There's only one table. IDK why they gave it in text...
+r = requests.get('http://download.geonames.org/export/dump/countryInfo.txt')
+
+# Read line by line
+lines = pd.Series(r.text.split('\n'))
+# We're gonna ignore the comment lines (starts with #)
+del_re = re.compile('^#[ \t].*$')
+lines = lines[(~lines.str.match(del_re))].reset_index(drop=True)
+
+# Normalize column names.
+col = re.sub(r' |-|\(|\)', string=lines[0][1:].lower(), repl='_').split('\t')
+# The first line is the column names, so drop that...
+lines = lines[1:]
+
+# It's tab-deliminated.
+c_df = lines.str.split('\t', expand=True)
+c_df.columns = col
+
+# Index on the two-character ISO code for the country. It's unique, and short.
+c_df = c_df.set_index('iso')
+
+# GIVE ME LIBERTY OR GIVE ME DEATH
+c_df['neighbors'] = c_df['neighbours']
+
+# We only care about a few of these. I'm not going to need things like...
+# phone-country-code...
+c_df = c_df.drop(['iso3', 'iso_numeric', 'fips',
+           'capital', 'area_in_sq_km_', 'tld',
+           'phone', 'postal_code_format', 'postal_code_regex',
+           'geonameid', 'equivalentfipscode', 'neighbours'], axis=1)
+# Not sure where it picked up a blank row, but it's there. So let's drop it.
+c_df = c_df.drop('')
+
+# And... let's get the primary language.
+# only 0-2 because en-US and en-UK are compatible, for example.
+c_df['p_lang'] = c_df['languages'].str[0:2]
+c_df
+```
+And make a column that contains the set of countries a song's artists are from:
+```
+df['countries'] = df['artists'].apply(lambda l: {co_orig_df.loc[a].origin for a in l if str(co_orig_df.loc[a].origin) != 'nan'})
+df
+```
+
+
+With this data, I made an [interactive visualization](https://terpconnect.umd.edu/~astarnes/csterpconnect/countries.html) of each country's neighbors. We'll use it later for testing of how well music taste flows over borders.
+```
+dot = Digraph(comment="Countries")
+dot.attr(bgcolor='#1f1f1f')
+dot.engine='fdp'
+dot.format = 'svg'
+color = {'AF':'#EBA6BC', # pink
+         'AN':'#C7A6D2', # mauve
+         'AS':'#F8EF95', # lemon
+         'EU':'#F3CA9C', # apricot
+         'NA':'#A2DEBF', # azure
+         'OC':'#B8E1B1', # mint
+         'SA':'#E2E680'  # chartruese
+        } #https://eleanormaclure.files.wordpress.com/2011/03/colour-coding.pdf; page 7 figure 4
+processed = []
+has_curr = []
+for i, row in c_df.iterrows():
+    processed.append(i)
+#     if len(c_df[c_df['p_lang'] == row.p_lang]) > 1:
+    for s in row['neighbors'].split(','):
+        if s == '':
+            continue
+        dot.node(row['country'],
+                 style='filled',
+                 color=color[row['continent']])
+        o_row = c_df.loc[s]
+        if s not in processed:
+            dot.edge(row['country'], o_row['country'],
+                     dir='none', penwidth='3', color='#ffffff')
+    processed.append(i)
+        
+    
+
+dot.render('countries.geo.fdp', view=True)  
+```
+
+
+We can also start to plot data! Let's compare Chinese versus Hong Kong music taste:
+```
+plt.figure(figsize=(10,8))
+#fromUS = df['countries'].apply(lambda c: 'US' in c)
+data = df#[fromUS]
+plt.xlabel('Chinese Score')
+plt.ylabel('Hong Kong Score')
+plt.title('Chinese Score vs. Hong Kong Score')
+plt.scatter('cn_pts', 'hk_pts', color="#3335FF20", s=5, data=data, marker='o')
+plt.show()
+```
+You can see that Chinese and Hong-Kong-Chinese people have similar tastes in music.
+
+Compare to the Chinese vs US:
+```
+plt.figure(figsize=(10,8))
+
+data = df
+plt.xlabel('Chinese Score')
+plt.ylabel('United States Score')
+plt.title('Chinese Score vs. United States Score')
+plt.scatter('cn_pts', 'us_pts', color="#3335FF20", s=5, data=data, marker='o')
+plt.show()
+
+```
+The data has not accumulated along the x=y line, so the music taste is less compatible.
 
 
